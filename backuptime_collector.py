@@ -1,22 +1,6 @@
-# TODO:
-# Change the copy time output from ms to s
-# Add backup size for master
-# change the size of the dump from bytes to MB
-# Some error exception when there is no data
-# Date difference problem between segments
-# if the copyformatter is zero in the previous run its fails , need to print proper message or ignore it
-# The script fails when the mirror and primary switch ( specially when there is no data )
-# Copycollector is giving a lot of headache when there is no data need to put proper error in place of dummy data
-# The master host is picking up copyoutput formatter need to fix it
-# The master data is printed at the end , need to place the output at first
-# Catalog issue , if the segments has a extra or missing table.
-# ddboost backup size
-#
-
-
 # Modules that will be used on the script
 # Made sure that we use modules that are pre-installed on python 2.6 to avoid adding modules via pip
-# as most customers dont have internet connection on the server.
+# as most customers don't have internet connection or is blocked on the main server.
 import sys, os, getopt, logging, subprocess, csv, glob, re, json
 from operator import itemgetter
 from datetime import datetime
@@ -88,7 +72,7 @@ class VariableClass():
 
         # Output File name
         self.InputFile = "gpdb" + "_" + __file__ + "_" + strftime("%Y%m%d%H%M%S", gmtime()) + ".csv"
-        self.OutputFile = __file__ + "_" + strftime("%Y%m%d%H%M%S", gmtime()) + ".log"
+        self.OutputFile = __file__ + "_" + strftime("%Y%m%d%H%M%S", gmtime()) + ".out"
         self.hostmapfile = "hostmap"
 
         # Format used to format the output of the script
@@ -225,6 +209,61 @@ def hostmapWriter(file, data):
     fo.close()
 
 
+# Function: LogFileWriter(text, dbid, host)
+# This function when called write the information on the log
+# Since the script is run from tempdir folder we dont need to provide the location.
+def LogFileWriter(text, dbid, host):
+
+    # Local Variable
+    tempdir = globalVariable.tempdir
+    outputfile = dbid + "_" + host + "_" + __file__ + ".log"
+
+    # Lets try to open the file
+    try:
+        fo = open(outputfile, "a")
+
+    # If we receive any exception during the opening of file
+    # Lets error out
+    except IOError:
+        logger.error("Unable to create the outputfile file: \"{0}\" in the directory: \"{1}\"".format(
+            outputfile,
+            tempdir
+        ))
+        sys.exit(2)
+
+    # write the data
+    with fo as output:
+        output.write(text)
+    fo.close()
+
+
+# Function : jsonWriter(appenddata, jsondatafile)
+# This writer process will keep appending the data from
+# copy collector to a file in JSONformat and it will keep
+# appending until we finish all the collection on the segment host
+def jsonWriter(appenddata, jsondatafile):
+
+    # First lets open the file if exists
+    try:
+        with open(jsondatafile) as f:
+
+            # And read all the data from the json file
+            data = json.load(f)
+
+            # And then update the new data we just received
+            data.update(appenddata)
+
+    # If its the first time then the file would not exists and we will end
+    # up with the error, here we ensure that we use that error to create the
+    # the file and add the content
+    except IOError:
+        data = appenddata
+
+    # Right, so now we have the data lets write them up to the file
+    with open(jsondatafile, 'w') as outfile:
+        json.dump(data, outfile, indent=4)
+
+
 # Function: RemoveTempdir(host, tempdir)
 # This function removes the temp work directory on all the host
 # of the hostmap.
@@ -297,6 +336,86 @@ def CreateTempdir(host):
         err = 'Error when trying to remove the old files from %s:%s' % (host, tempdir)
         print >> sys.stderr, err
         sys.exit(1)
+
+
+# Function : OutputFileMerger()
+# This function merge all the output file from all the segments to
+# a single file.
+def OutputFileMerger():
+
+    logger.info("Merging all the summary output from all segments onto a single file")
+
+    # Local Variables
+    WrkDir = os.path.dirname(os.path.realpath(__file__))
+    OutputFileName = globalVariable.OutputFile
+    files = "*{0}.log".format(__file__)
+    read_files = glob.glob(files)
+    ids = []
+    hosts = []
+
+    # Get the DBID's and the hostname from the filename
+    for file in read_files:
+        ids.append(int(file.split("_")[0]))
+        hosts.append(file.split("_")[1])
+        hosts = list(set(hosts))
+
+    # Sort the ids
+    ids.sort(key=int)
+
+    # Get the Master logfile.
+    # The first content of the merged output file
+    # should be from the master, so we begin by first reading and merging the master contents
+    if ids[0] == 1:
+        logger.debug("Merging the contents of master segment(dbid): \"{0}\"".format(
+            ids[0]
+        ))
+        file = "{0}/1_*_{1}.log".format(WrkDir, __file__)
+        read_files = glob.glob(file)
+        with open(OutputFileName, "a") as outfile:
+            for f in read_files:
+                        with open(f, "rb") as infile:
+                            MasterLogHeading = globalVariable.MasterLogHeading.format('') + "\n\n"
+                            outfile.write(MasterLogHeading)
+                            outfile.write(infile.read())
+
+        # now lets remove the master from the list since its already written
+        ids.remove(1)
+
+    # For the rest of the files lets
+    for host in hosts:
+
+        # This variable triggers when we have a new host
+        # this helps in having heading per host
+        stopper = 0
+
+        for id in ids:
+            files = "{0}/{1}_{2}_{3}.log".format(WrkDir, id, host, __file__)
+            logger.debug("Merging the contents of segments(dbid/host): \"{0}/{1}\"".format(
+                    id,
+                    host
+            ))
+            read_files = glob.glob(files)
+
+            # Append the outfile.
+            with open(OutputFileName, "a") as outfile:
+
+                # Read the file one by one
+                for f in read_files:
+                    with open(f, "rb") as infile:
+
+                        # if this the first time we are writing from the host
+                        # Lets place the header and place a stopper to avoid print
+                        # until we reach next host
+                        if stopper == 0:
+                            SegmentLogHeading = "\n\n" + globalVariable.SegmentLogHeading.format('', host) + "\n\n"
+                            outfile.write(SegmentLogHeading)
+                            stopper = 1
+
+                        # Write the contents from segments
+                        outfile.write(infile.read())
+
+    # Return the output file name.
+    return OutputFileName
 
 
 # Function : InputFileMerger(path, file, StartTime, EndTime)
@@ -759,34 +878,6 @@ def parseHostfile(hostmap):
     return hosts
 
 
-# Function: LogFileWriter(text, dbid, host)
-# This function when called write the information on the log
-# Since the script is run from tempdir folder we dont need to provide the location.
-def LogFileWriter(text, dbid, host):
-
-    # Local Variable
-    tempdir = globalVariable.tempdir
-    outputfile = dbid + "_" + host + "_" + __file__ + ".log"
-
-    # Lets try to open the file
-    try:
-        fo = open(outputfile, "a")
-
-    # If we receive any exception during the opening of file
-    # Lets error out
-    except IOError:
-        logger.error("Unable to create the outputfile file: \"{0}\" in the directory: \"{1}\"".format(
-            outputfile,
-            tempdir
-        ))
-        sys.exit(2)
-
-    # write the data
-    with fo as output:
-        output.write(text)
-    fo.close()
-
-
 # Function: SQLOutputFormatter(summary, basicinfo, segInfo)
 # This function format the SQL query into a readable log
 def SQLOutputFormatter(summary, basicinfo, segInfo):
@@ -960,6 +1051,144 @@ def SQLOutputFormatter(summary, basicinfo, segInfo):
     )
 
 
+# Function : CopyOutputFormatter(jsondatafile, host)
+# Once we get the merged data we then format the data and
+# write onto the file
+def CopyOutputFormatter(jsondatafile, host):
+
+    # TODO: Need to correct the names.
+    # TODO: Add logger information
+    # Local Variables
+    Heading = []
+    data = {}
+    TableList = {}
+    dumpsize = []
+    totalduration = []
+    totaldurationpertable = {}
+    TotalofTotal = globalVariable.TotalofTotal
+    Stopper = globalVariable.Stopper
+
+    # Copy formats
+    fmt1 = globalVariable.Copyfmt1
+    fmt2 = globalVariable.Copyfmt2
+    fmt3 = globalVariable.Copyfmt3
+
+    # Lets read all then contents from the json file
+    with open(jsondatafile) as file:
+        data = json.load(file)
+
+    # TODO: need some check here to understand if there is data , if not lets skip the rest of the stuff
+    # Lets have the heading information on the list
+    # and store the addon information on a another list and
+    # delete from the data
+    for key in data:
+        Heading.append(key)
+        totalduration.append(data[key]['InfoAddonstmts']['TotalstmtDuration'])
+        dumpsize.append(data[key]['InfoAddonstmts']['SegDumpsize'])
+        del data[key]['InfoAddonstmts']
+
+    # Get the length of the heading list to update the format string
+    ListLength = len(Heading) + 1
+
+    # Time to extend the fmt string based on the length of the heading
+    while ListLength != 1:
+        fmt1 = fmt1 + '{' + str(ListLength) + ':>21}|'
+        fmt2 = fmt2 + '{0:->21}|'
+        fmt3 = fmt3 + '{' + str(ListLength) + ':>21}|'
+        ListLength -= 1
+
+    # This is important in case we have catalog issues, such as
+    # some table exists on the segments and not on segments
+    # the formatting would fail with IndexError, so to overcome this
+    # we make a unique list of all the table for all the segments in the host
+    # and use as base to compare the tables.
+    for h in Heading:
+        for key in data[h]:
+            if key not in TableList:
+                TableList[key] = []
+                totaldurationpertable[key] = 0
+
+    # Now we have a base to check on table names , lets see who has the
+    # data and who doesnt and store them on a list, same time lets add
+    # the time per table.
+    for h in Heading:
+        for table in TableList:
+            if table in data[h]:
+                TableList[table].append(data[h][table])
+                totaldurationpertable[table] += data[h][table]
+            else:
+                TableList[table].append(None)
+
+    # Okie now we have the data, its time to format and write data
+
+    if Stopper != 1:
+        CopyDataLine = "\n" + "Data Backup Time Table in Seconds for host: {0}".format(host) + "\n"
+        LogFileWriter(
+            CopyDataLine,
+            '9999999',
+            host
+    )
+
+    # Line adder.
+    LineAdder = fmt2.format('')
+
+    # Heading Line
+    HeadingLine = "\n" + LineAdder + "\n" + fmt1.format(
+                     'Table Name',
+                     'Total',
+                     *Heading
+             ) + "\n" + LineAdder + "\n"
+
+    # Writing to the file.
+    LogFileWriter(
+        HeadingLine,
+        '9999999',
+        host
+    )
+
+    # The table duration time, we sort based on the name.
+    for table in sorted(TableList):
+        TableDurationLine = fmt3.format(
+                 table,
+                 totaldurationpertable[table],
+                 *TableList[table]
+         ) + "\n"
+
+        # Writing to the file.
+        LogFileWriter(
+                TableDurationLine,
+                '9999999',
+                host
+        )
+
+        # Sum of all the total.
+        TotalofTotal = totaldurationpertable[table] + TotalofTotal
+
+    # Total time took
+    TotalLine = LineAdder + "\n" + fmt3.format(
+            'Total Time Spend(s)',
+            TotalofTotal,
+            *totalduration
+         ) + "\n" + LineAdder + "\n"
+
+    # Writing to the file.
+    LogFileWriter(
+            TotalLine,
+            '9999999',
+            host
+        )
+
+    # Size of the dump
+    DumpSizeLine = fmt3.format('Size of Dump(MB)', sum(dumpsize), *dumpsize) + "\n" + LineAdder + "\n\n"
+
+    # Writing to the file.
+    LogFileWriter(
+            DumpSizeLine,
+            '9999999',
+            host
+        )
+
+
 # Function: MasterLogReader(logfile, segInfo)
 # This is the main function that reads the master log, this obtain the pid of the backup process
 # and gathers the statement, number of execution and the time it took to execute
@@ -1060,7 +1289,7 @@ def MasterLogReader(logfile, segInfo):
             # During the same read of the logfile we will also hunt for the pid which executed the access share lock
             # again , if the database users run share lock via their application job we may end up having the wrong pid
             # there is nothing we can do but to print everything that was run by the user.
-            if row[pQuery].startswith('LOCK TABLE') == True and row[pQuery].endswith('IN ACCESS SHARE MODE') == True:
+            if row[pQuery].startswith('LOCK TABLE') and row[pQuery].endswith('IN ACCESS SHARE MODE'):
                 sharelockpid.append(row[pPid])
                 sharelockpid = list(set(sharelockpid))
 
@@ -1166,6 +1395,12 @@ def MasterLogReader(logfile, segInfo):
             # Reality Check, Lets check if we have data for the exclusive lock PID
             # If we do then lets call the SQL Formatter and print the information on the log
             if InfoExclusiveLock['ExclusiveLockPid'] != 0 and InfoExclusiveLock['flag'] == 'DATA':
+                logger.debug("Calling Exclusive Lock SQL Formatter for master segment (host/dbid/content): \"{0}/{1}/{2}\"".format(
+                    segInfo['host'],
+                    segInfo['dbid'],
+                    segInfo['content']
+
+                ))
                 SQLOutputFormatter(
                         SummaryExclusiveLock,
                         InfoExclusiveLock,
@@ -1295,6 +1530,13 @@ def MasterLogReader(logfile, segInfo):
             # Reality Check, Lets check if we have data for the share lock PID
             # If we do then lets call the SQL Formatter and print the information on the log
             if InfoShareLock['ShareLockPid'] != 0 and InfoShareLock['flag'] == 'DATA':
+                logger.debug("Calling Share Lock SQL Formatter for master segment (host/dbid/content): \"{0}/{1}/{2}\"".format(
+                    segInfo['host'],
+                    segInfo['dbid'],
+                    segInfo['content']
+
+                ))
+
                 SQLOutputFormatter(
                         SummaryShareLock,
                         InfoShareLock,
@@ -1332,35 +1574,6 @@ def MasterLogReader(logfile, segInfo):
                 logfile
             ))
             os.remove(logfile)
-
-
-# Function : jsonWriter(appenddata, jsondatafile)
-# This writer process will keep appending the data from
-# copy collector to a file in JSONformat and it will keep
-# appending until we finish all the collection on the segment host
-def jsonWriter(appenddata, jsondatafile):
-
-    # TODO: Get a proper file name for this function
-
-    # First lets open the file if exists
-    try:
-        with open(jsondatafile) as f:
-
-            # And read all the data from the json file
-            data = json.load(f)
-
-            # And then update the new data we just received
-            data.update(appenddata)
-
-    # If its the first time then the file would not exists and we will end
-    # up with the error, here we ensure that we use that error to create the
-    # the file and add the content
-    except IOError:
-        data = appenddata
-
-    # Right, so now we have the data lets write them up to the file
-    with open(jsondatafile, 'w') as outfile:
-        json.dump(data, outfile, indent=4)
 
 
 # Function: SegmentLogReader(logfile, segInfo)
@@ -1428,7 +1641,7 @@ def SegmentLogReader(logfile, segInfo):
             # takes in share lock for the process so we capture that PID of the process that
             # executed the share lock and use that as the base line to hunt for
             # rest of the information
-            if row[pQuery].startswith('LOCK TABLE') == True and row[pQuery].endswith('IN ACCESS SHARE MODE') == True:
+            if row[pQuery].startswith('LOCK TABLE') and row[pQuery].endswith('IN ACCESS SHARE MODE') :
                 SegmentProcesspid.append(row[pPid])
                 SegmentProcesspid = list(set(SegmentProcesspid))
 
@@ -1577,9 +1790,21 @@ def SegmentLogReader(logfile, segInfo):
             if InfoSegmentProcess['SegmentPid'] != 0 and InfoSegmentProcess['flag'] == 'DATA':
 
                 # Calling the JsonWriter to store all the data from COPY to a single file
+                logger.debug("Calling Json Writer to store the COPY data for segment (host/dbid/content): \"{0}/{1}/{2}\"".format(
+                    segInfo['host'],
+                    segInfo['dbid'],
+                    segInfo['content']
+
+                ))
                 jsonWriter(CopyTimeCollector, jsondatafile)
 
                 # Formatting the SQL Formatter to format the SQL statements
+                logger.debug("Calling SQL Formatter for segment (host/dbid/content): \"{0}/{1}/{2}\"".format(
+                    segInfo['host'],
+                    segInfo['dbid'],
+                    segInfo['content']
+
+                ))
                 SQLOutputFormatter(
                         SummarySegmentQuery,
                         InfoSegmentProcess,
@@ -1624,198 +1849,6 @@ def SegmentLogReader(logfile, segInfo):
             os.remove(logfile)
 
 
-# Function : CopyOutputFormatter(jsondatafile, host)
-# Once we get the merged data we then format the data and
-# write onto the file
-def CopyOutputFormatter(jsondatafile, host):
-
-    # TODO: Need to correct the names.
-    # TODO: Add logger information
-    # Local Variables
-    Heading = []
-    data = {}
-    TableList = {}
-    dumpsize = []
-    totalduration = []
-    totaldurationpertable = {}
-    TotalofTotal = globalVariable.TotalofTotal
-    Stopper = globalVariable.Stopper
-
-    # Copy formats
-    fmt1 = globalVariable.Copyfmt1
-    fmt2 = globalVariable.Copyfmt2
-    fmt3 = globalVariable.Copyfmt3
-
-    # Lets read all then contents from the json file
-    with open(jsondatafile) as file:
-        data = json.load(file)
-
-    # TODO: need some check here to understand if there is data , if not lets skip the rest of the stuff
-    # Lets have the heading information on the list
-    # and store the addon information on a another list and
-    # delete from the data
-    for key in data:
-        Heading.append(key)
-        totalduration.append(data[key]['InfoAddonstmts']['TotalstmtDuration'])
-        dumpsize.append(data[key]['InfoAddonstmts']['SegDumpsize'])
-        del data[key]['InfoAddonstmts']
-
-    # Get the length of the heading list to update the format string
-    ListLength = len(Heading) + 1
-
-    # Time to extend the fmt string based on the length of the heading
-    while ListLength != 1:
-        fmt1 = fmt1 + '{' + str(ListLength) + ':>21}|'
-        fmt2 = fmt2 + '{0:->21}|'
-        fmt3 = fmt3 + '{' + str(ListLength) + ':>21}|'
-        ListLength -= 1
-
-    # This is important in case we have catalog issues, such as
-    # some table exists on the segments and not on segments
-    # the formatting would fail with IndexError, so to overcome this
-    # we make a unique list of all the table for all the segments in the host
-    # and use as base to compare the tables.
-    for h in Heading:
-        for key in data[h]:
-            if key not in TableList:
-                TableList[key] = []
-                totaldurationpertable[key] = 0
-
-    # Now we have a base to check on table names , lets see who has the
-    # data and who doesnt and store them on a list, same time lets add
-    # the time per table.
-    for h in Heading:
-        for table in TableList:
-            if table in data[h]:
-                TableList[table].append(data[h][table])
-                totaldurationpertable[table] += data[h][table]
-            else:
-                TableList[table].append(None)
-
-    # Okie now we have the data, its time to format and write data
-
-    if Stopper != 1:
-        CopyDataLine = "\n" + "Data Backup Time Table in Seconds for host: {0}".format(host) + "\n\n"
-        LogFileWriter(
-            CopyDataLine,
-            '9999999',
-            host
-    )
-
-    # Line adder.
-    LineAdder = fmt2.format('')
-
-    # Heading Line
-    HeadingLine = "\n" + LineAdder + "\n" + fmt1.format(
-                     'Table Name',
-                     'Total',
-                     *Heading
-             ) + "\n" + LineAdder + "\n"
-
-    # Writing to the file.
-    LogFileWriter(
-        HeadingLine,
-        '9999999',
-        host
-    )
-
-    # The table duration time, we sort based on the name.
-    for table in sorted(TableList):
-        TableDurationLine = fmt3.format(
-                 table,
-                 totaldurationpertable[table],
-                 *TableList[table]
-         ) + "\n"
-
-        # Writing to the file.
-        LogFileWriter(
-                TableDurationLine,
-                '9999999',
-                host
-        )
-
-        # Sum of all the total.
-        TotalofTotal = totaldurationpertable[table] + TotalofTotal
-
-    # Total time took
-    TotalLine = LineAdder + "\n" + fmt3.format(
-            'Total Time Spend(s)',
-            TotalofTotal,
-            *totalduration
-         ) + "\n" + LineAdder + "\n"
-
-    # Writing to the file.
-    LogFileWriter(
-            TotalLine,
-            '9999999',
-            host
-        )
-
-    # Size of the dump
-    DumpSizeLine = fmt3.format('Size of Dump(MB)', sum(dumpsize), *dumpsize) + "\n" + LineAdder + "\n\n"
-
-    # Writing to the file.
-    LogFileWriter(
-            DumpSizeLine,
-            '9999999',
-            host
-        )
-
-def OutputFileMerger():
-
-    # Local Variables
-    WrkDir = os.path.dirname(os.path.realpath(__file__))
-    OutputFileName = globalVariable.OutputFile
-    files = "*{0}.log".format(__file__)
-    read_files = glob.glob(files)
-    ids = []
-    hosts = []
-    stopper = globalVariable.Stopper
-
-    # Get the DBID's and the hostname from the filename
-    for file in read_files:
-        ids.append(int(file.split("_")[0]))
-        hosts.append(file.split("_")[1])
-        hosts = list(set(hosts))
-
-    # Sort the ids
-    ids.sort(key=int)
-
-    # Get the Master logfile.
-    if ids[0] == 1:
-        file = "{0}/1_*_{1}.log".format(WrkDir, __file__)
-        read_files = glob.glob(file)
-        with open(OutputFileName, "a") as outfile:
-            for f in read_files:
-                        with open(f, "rb") as infile:
-                            MasterLogHeading = globalVariable.MasterLogHeading.format('') + "\n\n"
-                            outfile.write(MasterLogHeading)
-                            outfile.write(infile.read())
-
-        # now lets remove the master from the list
-        ids.remove(1)
-
-    # For the rest of the files lets
-
-    for host in hosts:
-
-        stopper = 0
-
-        for id in ids:
-            files = "{0}/{1}_{2}_{3}.log".format(WrkDir, id, host, __file__)
-            read_files = glob.glob(files)
-            with open(OutputFileName, "a") as outfile:
-
-                for f in read_files:
-                    with open(f, "rb") as infile:
-
-                        if stopper == 0:
-                            SegmentLogHeading = "\n\n" + globalVariable.SegmentLogHeading.format('', host) + "\n\n"
-                            outfile.write(SegmentLogHeading)
-                            stopper = 1
-
-                        outfile.write(infile.read())
-
 # Function : RunProgram()
 # This function is now running on the segment servers
 # This function calls all the remaining function on the script to gather than backup time information.
@@ -1824,6 +1857,7 @@ def RunProgram():
     # Local Variable
     tempdir = globalVariable.tempdir
     segInfo = {}
+    Path = ''
 
     # Let get the Start time and end time from the OS Env.
     host = os.getenv('host1', '')
@@ -1887,13 +1921,21 @@ def RunProgram():
 
         # We expect hostfile to be on a single location, but to be on safe side if the user provide logfile
         # at multiple location, lets take one of the logfile directory to create a inputfile.
-        # TODO: What if the first file doesnt exits then the path is no longer valid for input file
-        # Need to fix it
-        logfile = segment[1].split(",")[0]
-        Path = os.path.dirname(logfile)
+        logfiles = segment[1].split(",")
+        for logfile in logfiles:
+            if os.path.isfile(logfile):
+                Path = os.path.dirname(logfile)
+
+        if not Path:
+            logger.error("None of the logfile provided for segment (host/dbid/content): \"{0}/{1}/{2}\" exists, exiting...".format(
+                segInfo['host'],
+                segInfo['dbid'],
+                segInfo['content']
+            ))
+            sys.exit(2)
 
         # If there are multiple logfile of the same date, we will merge them to a single file
-        # this helps in reducing complexity with the code and its much quicker , since in that file
+        # this helps in reducing complexity with the code and its much quicker, since in that file
         # we have only the contents from start time to the end time, so less content to read.
         for log in segInfo['logfile'].split(","):
 
@@ -1909,7 +1951,7 @@ def RunProgram():
             # If there is no logfile from the provided list warn the user, maybe the logfile was removed using
             # dca_log_cleanup if this is a DCA machine or some other script or its a wrong logfile name don't know..
             else:
-                logger.warn("There seems the logfile: \"{0}\" "
+                logger.warn("The logfile: \"{0}\" "
                              "doesn't exist on segment with host: \"{1}\", content: \"{2}\", dbid: \"{3}\"".format(
                         log,
                         segInfo['host'],
@@ -2143,10 +2185,18 @@ def main():
             tempdir
     )
 
-    OutputFileMerger()
-    # TODO: AT the end print the merge logfile name
+    # Okie so we successfully completed all the task, time to megre all the
+    # files as one
+    OutputFile = OutputFileMerger()
+
+    # Success message
     logger.info("Program: \"{0}\" successfully completed".format(
         __file__
+        ))
+
+    # Logfile Location
+    logger.info("Backup summary from all segments is merged onto file: \"{0}\" ".format(
+        os.path.abspath(OutputFile)
         ))
 
 # Start the main program.
@@ -2154,4 +2204,3 @@ if __name__ == '__main__':
     main()
 
 # TODO: Incremental backup
-# ToDO: Create a view and see if you can find a COPY
