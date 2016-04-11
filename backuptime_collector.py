@@ -1,7 +1,7 @@
 # Modules that will be used on the script
 # Made sure that we use modules that are pre-installed on python 2.6 to avoid adding modules via pip
 # as most customers don't have internet connection or is blocked on the main server.
-import sys, os, getopt, logging, subprocess, csv, glob, re, json
+import sys, os, getopt, logging, subprocess, csv, glob, re, json, time
 from operator import itemgetter
 from datetime import datetime
 from time import gmtime, strftime
@@ -195,12 +195,12 @@ def hostmapWriter(file, data):
 
     # Open the file provided
     try:
-        fo = open(file, "a")
+        fo = open(file, "a+")
 
     # Incase we don't have permission to write to the directory or some other
     # error when we try to open the file exit the program
     except IOError:
-        logger.error("Unable to create the hostmap file in the current directory")
+        logger.error("Unable to create the hostmap file in the working directory")
         sys.exit(2)
 
     # write the content and close the file
@@ -220,7 +220,7 @@ def LogFileWriter(text, dbid, host):
 
     # Lets try to open the file
     try:
-        fo = open(outputfile, "a")
+        fo = open(outputfile, "a+")
 
     # If we receive any exception during the opening of file
     # Lets error out
@@ -274,6 +274,7 @@ def RemoveTempdir(host, tempdir):
         host
     ))
 
+    # TODO: Try to find some way to remove the old log found on the work directory ..
     # Check if there temp directory already on the host, if yes remove them
     try:
         subprocess.check_call(
@@ -849,14 +850,17 @@ def parseHostfile(hostmap):
     # the below ensure its is set to unique.
     hosts = list(set(hosts))
 
-    # Lets start the program by calling the contents in the hostmap one by one
-    # here we split the hostmap based on host and then send write it to temp
-    # work directory
+    # Time to create work directory
     logger.info("Creating work directory and splitting the hostmap by host")
     for h in hosts:
 
         # For each host create a working directory
         CreateTempdir(h)
+
+    # Lets start the program by calling the contents in the hostmap one by one
+    # here we split the hostmap based on host and then send write it to temp
+    # work directory
+    for h in hosts:
 
         # Create a hostmap file by hostname
         hostmapperfile = tempdir + "/hostmap_" + h
@@ -1056,8 +1060,6 @@ def SQLOutputFormatter(summary, basicinfo, segInfo):
 # write onto the file
 def CopyOutputFormatter(jsondatafile, host):
 
-    # TODO: Need to correct the names.
-    # TODO: Add logger information
     # Local Variables
     Heading = []
     data = {}
@@ -1077,15 +1079,22 @@ def CopyOutputFormatter(jsondatafile, host):
     with open(jsondatafile) as file:
         data = json.load(file)
 
-    # TODO: need some check here to understand if there is data , if not lets skip the rest of the stuff
     # Lets have the heading information on the list
     # and store the addon information on a another list and
     # delete from the data
     for key in data:
         Heading.append(key)
-        totalduration.append(data[key]['InfoAddonstmts']['TotalstmtDuration'])
-        dumpsize.append(data[key]['InfoAddonstmts']['SegDumpsize'])
-        del data[key]['InfoAddonstmts']
+
+        # If the copy json file has issues, lets do a early exit from this function
+        # rather than providing error output especially this issue can happen when there is incremental backup and
+        # no changes was found.
+        try:
+            totalduration.append(data[key]['InfoAddonstmts']['TotalstmtDuration'])
+            dumpsize.append(data[key]['InfoAddonstmts']['SegDumpsize'])
+            del data[key]['InfoAddonstmts']
+        except KeyError:
+            logger.warn("Unable to format the time from data backup, check the start / end date provided")
+            return "Nothing"
 
     # Get the length of the heading list to update the format string
     ListLength = len(Heading) + 1
@@ -1120,7 +1129,8 @@ def CopyOutputFormatter(jsondatafile, host):
                 TableList[table].append(None)
 
     # Okie now we have the data, its time to format and write data
-
+    # Lets give the dbid of the copy file 9999999 , since this ensure the file always read by the
+    # copy formatter at the end and the file is merged at the end of the SQL output
     if Stopper != 1:
         CopyDataLine = "\n" + "Data Backup Time Table in Seconds for host: {0}".format(host) + "\n"
         LogFileWriter(
@@ -1469,21 +1479,21 @@ def MasterLogReader(logfile, segInfo):
 
                     # Statement
                     # We club all the LOCK TABLE as one statement
-                    if row[pQuery].startswith('LOCK TABLE') == True:
+                    if row[pQuery].startswith('LOCK TABLE'):
                        statement="LOCK TABLE X IN ACCESS SHARE MODE"
 
                     # We club all the COPY statement as one statement
-                    elif row[pQuery].startswith('COPY') == True:
+                    elif row[pQuery].startswith('COPY'):
                        statement="COPY X(x,y,z,..) TO stdout"
 
                     # We trim the statement into 28 character since after that some of the statement
                     # starts to add relation name which make that statement (even though the same) points as
                     # different statement.
-                    elif row[pQuery].upper().startswith('SELECT') == True:
+                    elif row[pQuery].upper().startswith('SELECT'):
                        statement = row[pQuery][0:28]
 
                     # We club the search_path as one
-                    elif row[pQuery].upper().startswith('SET SEARCH_PATH') == True:
+                    elif row[pQuery].upper().startswith('SET SEARCH_PATH'):
                        statement = "SET SEARCH_PATH X, pg_catalog"
 
                     # Rest of the statement we print as it is.
@@ -1641,7 +1651,7 @@ def SegmentLogReader(logfile, segInfo):
             # takes in share lock for the process so we capture that PID of the process that
             # executed the share lock and use that as the base line to hunt for
             # rest of the information
-            if row[pQuery].startswith('LOCK TABLE') and row[pQuery].endswith('IN ACCESS SHARE MODE') :
+            if row[pQuery].startswith('LOCK TABLE') and row[pQuery].endswith('IN ACCESS SHARE MODE'):
                 SegmentProcesspid.append(row[pPid])
                 SegmentProcesspid = list(set(SegmentProcesspid))
 
@@ -1703,7 +1713,6 @@ def SegmentLogReader(logfile, segInfo):
                         # Get the table name
                         tableName = statement.split(' ')[1]
 
-                        # TODO: Change the duration format here
                         # Get the duration of the COPY statement
                         duration = float("%.2f" % float(float(row[pDuration].split(' ')[1]) * timeConvertor))
 
@@ -1732,17 +1741,20 @@ def SegmentLogReader(logfile, segInfo):
                         InfoSegmentProcess['totaltime'] += float(row[pDuration].split(' ')[1])
 
                         # We club all the LOCK TABLE statement as ONE
-                        if row[pQuery].startswith('LOCK TABLE') == True:
+                        if row[pQuery].startswith('LOCK TABLE'):
                             statement="LOCK TABLE X IN ACCESS SHARE MODE"
 
                         # We trim the statement into 28 character since after that some of the statement
                         # starts to add relation name which make that statement (even though the same) points as
-                        # different statement.
-                        elif row[pQuery].upper().startswith('SELECT') == True:
-                            statement = row[pQuery][0:28]
+                        # different statement. The reason for split is some SQL has statement on multi lines
+                        # so when made a merge file multi lines are not placed on the file , this causes the SQL
+                        # with multi lines to takes dates from the next lines, so the split ensures we only take in
+                        # SQL and doesnt provide any invalid message
+                        elif row[pQuery].upper().startswith('SELECT'):
+                            statement = row[pQuery][0:28].split("\n")[0]
 
                         # We club the search_path as one
-                        elif row[pQuery].upper().startswith('SET SEARCH_PATH') == True:
+                        elif row[pQuery].upper().startswith('SET SEARCH_PATH'):
                             statement = "SET SEARCH_PATH X, pg_catalog"
 
                         # Rest we leave at it is
@@ -1995,6 +2007,12 @@ def RunProgram():
 
         # for the rest of the content, call the segment reader
         else:
+            logger.info("Calling the Segment log reader to capture the information from logfile "
+                        "for segment (host/dbid/content): \"{0}/{1}/{2}\"".format(
+                segInfo['host'],
+                segInfo['dbid'],
+                segInfo['content']
+            ))
             jsondatafile = SegmentLogReader(
                     InputFile,
                     segInfo
@@ -2004,7 +2022,12 @@ def RunProgram():
     # Let call the copy formmatter to format all the copy data from
     # all the segment of this host.
     if jsondatafile:
+
+        logger.info("Formatting the time data obtained in backing up tables for segment host: \"{0}\"".format(
+                segInfo['host']
+            ))
         CopyOutputFormatter(jsondatafile, segInfo['host'])
+
 
 # Function: LaunchProcess(hostmapper, StartTime, EndTime)
 # The below function makes call to the segments and start the information capture.
@@ -2124,6 +2147,7 @@ def LaunchProcess(host, StartTime, EndTime, debug):
         print >> sys.stderr, err
         sys.exit(1)
 
+    # TODO: COpy the content if only exists
     # Copy all the file back to the main host(i.e mostly it should be master
     # Or from the host where the script was called.
     logger.info("Copying the contents from: \"{0}:{1}\" to the main host directory: \"{2}\"".format(
@@ -2157,6 +2181,10 @@ def main():
 
     # First thing first, parse the arguments passed.
     filename, StartTime, EndTime, debug = ArgumentParser(sys.argv[1:])
+
+    # Create the temp directory on the host, if not exists
+    if not os.path.exists(tempdir):
+        os.makedirs(tempdir)
 
     # Call the parseHostfile to split the file contents into a list
     hosts = parseHostfile(
@@ -2202,5 +2230,3 @@ def main():
 # Start the main program.
 if __name__ == '__main__':
     main()
-
-# TODO: Incremental backup
