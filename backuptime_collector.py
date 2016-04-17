@@ -2041,6 +2041,14 @@ def SegmentLogReader(logfile, segInfo):
                     segInfo['dbid'],
                     segInfo['host']
                 )
+    
+    # Since we have finished reading the merge file lets remove them, we place one at the end of the segment reader
+    # because in case if there is no DATA then we will leave orphan file on the directory, so making sure we will clean 
+    # it up ...
+    logger.info("Finished reading the merged file, removing the file: \"{0}\"".format(
+        logfile
+    ))
+    os.remove(logfile)
 
 # Function : RunProgram()
 # This function is now running on the segment servers
