@@ -11,6 +11,9 @@ from time import gmtime, strftime
 # so that its one place stop if we need to change anything on the future.
 class VariableClass():
     def __init__(self):
+        # Version
+        self.version = 1.0
+
         # Script logging process format and logger
         self.loggerformats = '%(asctime)s [%(levelname)s] %(message)s'
         self.logger = logging.getLogger(__file__)
@@ -115,6 +118,7 @@ class VariableClass():
           "-e, --end-time=\"TIMESTAMP\"                     End timestamp of the dump   (FORMAT: YYYY-MM-DD HH:MI:SS)\n" \
           "-b, --build-hostmap=\"DATE1[,DATE2,...]\"        Dates to search for logfile (FORMAT: YYYY-MM-DD)\n" \
           "-c, --contents=content1[,content2,...]         Contents of the segments interested (Default: ALL contents)\n" \
+          "-v, --version                                  Display Version of the program \n" \
           "-d, --debug                                    Enable Debug Mode\n\n" \
           "EXAMPLE:\n\n" \
           "To build a hostmap with the logs from the date say \"2016-03-21\"\n\n" \
@@ -130,6 +134,7 @@ class VariableClass():
           "GENERAL INFORMATION:\n\n" \
           "-- The script need a connection to database to build the hostmap, make sure the database env is sourced & \"psql -d template1\" works\n" \
           "-- Ensure that log_duration GUC is turned ON for all the segments \n" \
+          "-- If there are files (ends with .log) in the working directory make sure its moved or renamed to avoid conflict \n" \
           "-- Arguments -b & -c cannot run along with -f,-s,-e\n" \
           "-- Make sure the clock of segments servers are in sync\n" \
           "-- Script only gets the segment content information that are current primaries when the script is called\n"
@@ -243,6 +248,10 @@ def LogFileWriter(text, dbid, host):
 # appending until we finish all the collection on the segment host
 def jsonWriter(appenddata, jsondatafile):
 
+    logger.debug("Received information to write the jsondata to file: \"{0}\"".format(
+        jsondatafile
+    ))
+
     # First lets open the file if exists
     try:
         with open(jsondatafile) as f:
@@ -321,12 +330,17 @@ def CreateTempdir(host):
     ))
 
     # Since we have removed the directory we will need to create it.
+    # The point of the blank file (with dbid=0) is to ensure the scp doesn't fail since the
+    # segment didn't provide any data , this file does not harm since there is no data.
     try:
         subprocess.check_call(
-                'ssh -qtt %s \"mkdir -p %s\"' %
+                'ssh -qtt %s \"mkdir -p %s; touch %s/0_%s_%s.log\"' %
                 (
                     host,
-                    tempdir
+                    tempdir,
+                    tempdir,
+                    host,
+                    __file__
                 ),
                 shell=True
         )
@@ -353,6 +367,12 @@ def OutputFileMerger():
     ids = []
     hosts = []
 
+    # Remove the zero bytes files
+    for file in read_files:
+        id = int(file.split("_")[0])
+        if id == 0:
+            os.remove(file)
+
     # Get the DBID's and the hostname from the filename
     for file in read_files:
         ids.append(int(file.split("_")[0]))
@@ -366,7 +386,7 @@ def OutputFileMerger():
     # Get the Master logfile.
     # The first content of the merged output file
     # should be from the master, so we begin by first reading and merging the master contents
-    if ids[0] == 1:
+    if ids[1] == 1:
         logger.debug("Merging the contents of master segment(dbid): \"{0}\"".format(
             ids[0]
         ))
@@ -687,6 +707,7 @@ def HostmapBuilder(logdates, content):
 def ArgumentParser(argv):
 
     # Local Variables.
+    version = globalVariable.version
     StartTime = globalVariable.StartTime
     EndTime = globalVariable.EndTime
     filename = globalVariable.filename
@@ -700,7 +721,7 @@ def ArgumentParser(argv):
     try:
         opts, args = getopt.getopt(
                 argv,
-                'hf:s:e:b:c:d',
+                'hf:s:e:b:c:d:v',
                 [
                     'help',
                     'hostmap-file=',
@@ -708,7 +729,8 @@ def ArgumentParser(argv):
                     'end-time=',
                     'build-hostmap=',
                     'contents='
-                    'debug'
+                    'debug',
+                    'version'
                 ]
         )
         if not opts:
@@ -725,6 +747,10 @@ def ArgumentParser(argv):
         if opt in ('-h', '--help'):
             text = globalVariable.helpdoc
             Usage(text)
+
+        elif opt in ('-v', '--version'):
+            print "Program {0} version: {1}".format(__file__, version)
+            sys.exit(0)
 
         elif opt in ('-f', '--hostmap-file'):
 
@@ -1333,8 +1359,10 @@ def MasterLogReader(logfile, segInfo):
             # we will use the exception clause to get the post data dump
             if row[pDumpLocation].startswith('gp_dump_agent command line'):
 
-                logger.info("Getting the size of the dump for the host: \"{0}\"".format(
-                    segInfo['host']
+                logger.info("Getting the size of the dump for the segment (host/dbid/content): \"{0}/{1}/{2}\"".format(
+                    segInfo['host'],
+                    segInfo['dbid'],
+                    segInfo['content']
                 ))
                 # Dump file line
                 line = row[globalVariable.row_dumplocation]
@@ -1789,8 +1817,10 @@ def SegmentLogReader(logfile, segInfo):
                 # During this read we will try to get the size of the dump by this segment
                 if row[pDumpLocation].startswith('gp_dump_agent command line'):
 
-                    logger.info("Getting the size of the dump for the host: \"{0}\"".format(
-                            segInfo['host']
+                    logger.info("Getting the size of the dump for the segment (host/dbid/content): \"{0}/{1}/{2}\"".format(
+                        segInfo['host'],
+                        segInfo['dbid'],
+                        segInfo['content']
                     ))
 
                     # Dump file line
