@@ -367,18 +367,24 @@ def OutputFileMerger():
     ids = []
     hosts = []
 
+    logger.debug("Removing the file which starts with 0_*_{0}.log as its a temp file created".format(
+        __file__
+    ))
     # Remove the zero bytes files
     for file in read_files:
         id = int(file.split("_")[0])
         if id == 0:
             os.remove(file)
 
+    logger.debug("Get the dbid's and host for all the log file ")
     # Get the DBID's and the hostname from the filename
     for file in read_files:
         ids.append(int(file.split("_")[0]))
         hosts.append(file.split("_")[1])
         hosts = list(set(hosts))
         ids = list(set(ids))
+    logger.debug("The dbid's received are: {0}".format(ids))
+    logger.debug("The hostname received are: {0}".format(hosts))
 
     # Sort the ids
     ids.sort(key=int)
@@ -721,16 +727,16 @@ def ArgumentParser(argv):
     try:
         opts, args = getopt.getopt(
                 argv,
-                'hf:s:e:b:c:d:v',
+                'hf:s:e:b:c:vd',
                 [
                     'help',
                     'hostmap-file=',
                     'start-time=',
                     'end-time=',
                     'build-hostmap=',
-                    'contents='
-                    'debug',
-                    'version'
+                    'contents=',
+                    'version',
+                    'debug'
                 ]
         )
         if not opts:
@@ -1712,11 +1718,11 @@ def MasterLogReader(logfile, segInfo):
                     segInfo['host']
                 )
 
-            # Since we have finished reading the merge file lets remove them
-            logger.info("Finished reading the merged file, removing the file: \"{0}\"".format(
-                logfile
-            ))
-            os.remove(logfile)
+    # Since we have finished reading the merge file lets remove them
+    logger.info("Finished reading the merged file, removing the file: \"{0}\"".format(
+        logfile
+    ))
+    os.remove(logfile)
 
 
 # Function: SegmentLogReader(logfile, segInfo)
@@ -1996,6 +2002,12 @@ def SegmentLogReader(logfile, segInfo):
                         segInfo
                 )
 
+                # Since we have finished reading the merge file lets remove them
+                logger.info("Finished reading the merged file, removing the file: \"{0}\"".format(
+                    logfile
+                ))
+                os.remove(logfile)
+
                 # Since we have return the information lets give the information of the
                 # json file to be used by the formatter.
                 return jsondatafile
@@ -2026,13 +2038,6 @@ def SegmentLogReader(logfile, segInfo):
                     segInfo['dbid'],
                     segInfo['host']
                 )
-
-            # Since we have finished reading the merge file lets remove them
-            logger.info("Finished reading the merged file, removing the file: \"{0}\"".format(
-                logfile
-            ))
-            os.remove(logfile)
-
 
 # Function : RunProgram()
 # This function is now running on the segment servers
