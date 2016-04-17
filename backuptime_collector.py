@@ -274,7 +274,6 @@ def RemoveTempdir(host, tempdir):
         host
     ))
 
-    # TODO: Try to find some way to remove the old log found on the work directory ..
     # Check if there temp directory already on the host, if yes remove them
     try:
         subprocess.check_call(
@@ -359,6 +358,7 @@ def OutputFileMerger():
         ids.append(int(file.split("_")[0]))
         hosts.append(file.split("_")[1])
         hosts = list(set(hosts))
+        ids = list(set(ids))
 
     # Sort the ids
     ids.sort(key=int)
@@ -425,6 +425,15 @@ def OutputFileMerger():
 # Since we assume the directory were the logfiles are should have enough space to accommodate this file.
 def InputFileMerger(path, file, StartTime, EndTime):
 
+    # Local variable
+    # The reason why we need this junk is if file has no ending (i.e ends with "statement: "
+    # after we create the inputfile , The script fails so we always ensure that
+    # there is a ending line with this junk data
+    junk = r'2016-04-16 12:10:47.750086 PDT,"gpadmin","template1",p100,th-1335258640,"127.0.0.1","7133",2016-04-16 ' \
+           r'12:10:47 PDT,44752,con540,cmd27,seg-1,,,x44752,sx1,"LOG","00000","statement:",,,,,,,,,,," ' \
+           r'SELECT typname, typlen FROM pg_type WHERE oid=19",,,,,,"SELECT typname, typlen FROM pg_type ' \
+           r'WHERE oid=19",0,,"postgres.c",1618,'
+
     logger.debug("Received call to filter the logfile: \"{0}\" from \"{1}\" to \"{2}\"".format(
             file,
             StartTime,
@@ -445,7 +454,17 @@ def InputFileMerger(path, file, StartTime, EndTime):
             with open(f, "rb") as infile:
                     for row in infile.readlines():
                         if row[0:19] >= StartTime and row[0:19] <= EndTime:
+
+                            # There is a issue when the SQL statement is on the next line
+                            # the script fails since there is no ending, so we place rest of the terminator to avoid
+                            # IndexError related errors.
+                            # Moreover we don't care for the statement line in the script since the calculation are done
+                            # on the duration line, so it doesnt matter for the remaining scripts
+                            row = row.replace('statement: \n','statement:",,,,,,,,,,,",\n')
                             outfile.write(row)
+
+                    # # End the inputfile with a junk data, so that we ensure always there is a ending..
+                    outfile.write(junk)
 
     # Return the name of the inputfile which has the content
     return InputFile
@@ -474,15 +493,52 @@ def StripHostmap(hostmap):
         sys.exit(2)
 
 
+# Function: ddboost_dump_size(dumpfile)
+# Get the size of the dump using the gpmfr command.
+def ddboost_dump_size(dumpfile):
+
+    # Timestamp of the dump
+    timestamp = dumpfile.split('gp_dump')[1].split('_')[3].split('.')[0]
+    logger.debug("Timestamp of the backup: \"{0}\"".format(timestamp))
+
+    # Command to extract the dump size
+    command = 'gpmfr --list-file ' + timestamp + '| grep \'^' + dumpfile + '$\''
+
+    # Execute the command
+    sizecommand = subprocess.Popen(
+            command,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+    )
+
+    # The size of the dump is
+    try:
+        size = sizecommand.stdout.read().split("\t")[3].split("\n")
+
+    # If there is a exception
+    except IndexError:
+        logger.warn("Received exception in getting the size of the dump, setting the size of the dump to Zero")
+        size = 0
+
+    # return the size
+    return size
+
+
 # Function: DumpSize(dumplocation)
 # Function to get the size of the dump
 def DumpSize(dumplocation):
 
-    # TODO: make changes to the function to incorporate the ddboost command.
+    # The size of the dump is
     try:
         size = os.path.getsize(dumplocation)
+
+    # If there is a exception
     except OSError:
+        logger.warn("Received exception in getting the size of the dump, setting the size of the dump to Zero")
         size = 0
+
+    # return the size
     return size
 
 
@@ -521,7 +577,8 @@ def HostmapBuilder(logdates, content):
 
     # If the database is not started then error out and exit the program
     if OSreturnCode != 0:
-        logger.error("Database template1 seems to be unreachabe, please check the environment is sourced or database is up")
+        logger.error("Database template1 seems to be unreachabe, please check "
+                     "the environment is sourced or database is up")
         sys.exit(2)
 
     # If the contents are provided change the default query.
@@ -783,7 +840,9 @@ def ArgumentParser(argv):
 # on all the logfiles found on the segment running on that host
 def parseHostfile(hostmap):
 
-    logger.info("The function to parse the hostmap file: \"{0}\" has been called".format(hostmap))
+    logger.info("The function to parse the hostmap file: \"{0}\" has been called".format(
+            hostmap
+    ))
 
     # Local Variables.
     hosts = []
@@ -1069,6 +1128,7 @@ def CopyOutputFormatter(jsondatafile, host):
     totaldurationpertable = {}
     TotalofTotal = globalVariable.TotalofTotal
     Stopper = globalVariable.Stopper
+    timeformat = globalVariable.timeFormat
 
     # Copy formats
     fmt1 = globalVariable.Copyfmt1
@@ -1132,7 +1192,7 @@ def CopyOutputFormatter(jsondatafile, host):
     # Lets give the dbid of the copy file 9999999 , since this ensure the file always read by the
     # copy formatter at the end and the file is merged at the end of the SQL output
     if Stopper != 1:
-        CopyDataLine = "\n" + "Data Backup Time Table in Seconds for host: {0}".format(host) + "\n"
+        CopyDataLine = "\n" + "Data Backup Time Table("+ timeformat +") for host: {0}".format(host) + "\n"
         LogFileWriter(
             CopyDataLine,
             '9999999',
@@ -1259,6 +1319,7 @@ def MasterLogReader(logfile, segInfo):
         sys.exit(2)
 
     # Reading the file
+
     with file as csvfile:
         reader = csv.reader(csvfile, delimiter=',')
         logger.info("Reading the logfile to identify the exclusive lock PID & share lock PID")
@@ -1267,25 +1328,68 @@ def MasterLogReader(logfile, segInfo):
 
         for row in reader:
 
-            # TODO: ddboost command size
-
             # While we capture the information of PID, lets get the dump file name and
             # location, so that we can get the size of the dump, since in the master has two dumps
             # we will use the exception clause to get the post data dump
-            if row[globalVariable.row_dumplocation].startswith('gp_dump_agent command line'):
+            if row[pDumpLocation].startswith('gp_dump_agent command line'):
 
-                # Lets try reading the row which has the dump location information
-                try:
-                    dumplocation = row[pDumpLocation].split('>')[2].strip()
-                    FileSize = DumpSize(dumplocation) / sizeConvertor
-                    InfoExclusiveLock['dumpsize'] = FileSize
+                logger.info("Getting the size of the dump for the host: \"{0}\"".format(
+                    segInfo['host']
+                ))
+                # Dump file line
+                line = row[globalVariable.row_dumplocation]
 
-                # Here we do expect a error, so lets use the error detection to find the post data
-                # dump location and size.
-                except IndexError:
-                    dumplocation = row[pDumpLocation].split('>')[1].strip()
-                    FileSize = DumpSize(dumplocation) / sizeConvertor
-                    InfoExclusiveLock['postdumpsize'] = FileSize
+                # If the line has ddboost command on it.
+                if 'gpddboost' in line:
+
+                    logger.debug("This a ddboost backup")
+
+                    # fully qualified path
+                    path = row[18].split('--to-file=')[1].split(" ")[0].rpartition('/')
+
+                    # Filename of the dump.
+                    dumplocation = path[-1]
+
+                    # If file has postdata word
+                    if 'post_data' in dumplocation:
+
+                        # Get the file size
+                        FileSize = ddboost_dump_size(dumplocation) / sizeConvertor
+                        InfoExclusiveLock['postdumpsize'] = FileSize
+
+                    # If doesnt have post data then its actual dump
+                    else:
+                        FileSize = ddboost_dump_size(dumplocation) / sizeConvertor
+                        InfoExclusiveLock['dumpsize'] = FileSize
+
+                    logger.debug("Backup stats (path|filename|size): \"{0}|{1}|{2}\"".format(
+                        path,
+                        dumplocation,
+                        FileSize
+                    ))
+
+                # If the backup is not at ddboost
+                else:
+
+                    logger.debug("The backup is on the filesystem")
+
+                    # Lets try reading the row which has the dump location information
+                    try:
+                        dumplocation = line.split('>')[2].strip()
+                        FileSize = DumpSize(dumplocation) / sizeConvertor
+                        InfoExclusiveLock['dumpsize'] = FileSize
+
+                    # Here we do expect a error, so lets use the error detection to find the post data
+                    # dump location and size.
+                    except IndexError:
+                        dumplocation = line.split('>')[1].strip()
+                        FileSize = DumpSize(dumplocation) / sizeConvertor
+                        InfoExclusiveLock['postdumpsize'] = FileSize
+
+                    logger.debug("Backup stats (path|size): \"{0}|{1}\"".format(
+                        dumplocation,
+                        FileSize
+                    ))
 
             # The only way to identify the backup pid is to hunt for pg_class lock
             # There is no other clear way as of the moment.
@@ -1405,7 +1509,8 @@ def MasterLogReader(logfile, segInfo):
             # Reality Check, Lets check if we have data for the exclusive lock PID
             # If we do then lets call the SQL Formatter and print the information on the log
             if InfoExclusiveLock['ExclusiveLockPid'] != 0 and InfoExclusiveLock['flag'] == 'DATA':
-                logger.debug("Calling Exclusive Lock SQL Formatter for master segment (host/dbid/content): \"{0}/{1}/{2}\"".format(
+                logger.debug("Calling Exclusive Lock SQL Formatter "
+                             "for master segment (host/dbid/content): \"{0}/{1}/{2}\"".format(
                     segInfo['host'],
                     segInfo['dbid'],
                     segInfo['content']
@@ -1490,7 +1595,7 @@ def MasterLogReader(logfile, segInfo):
                     # starts to add relation name which make that statement (even though the same) points as
                     # different statement.
                     elif row[pQuery].upper().startswith('SELECT'):
-                       statement = row[pQuery][0:28]
+                       statement = row[pQuery][0:28].split("\n")[0]
 
                     # We club the search_path as one
                     elif row[pQuery].upper().startswith('SET SEARCH_PATH'):
@@ -1592,7 +1697,6 @@ def MasterLogReader(logfile, segInfo):
 def SegmentLogReader(logfile, segInfo):
 
     # Local variables
-    # TODO: need to cleanup unnecessary comments here
     # The below parameters tells the segment log reader where you will find
     # date , pid , duration it took & the statement etc
     pDate = globalVariable.row_date
@@ -1682,11 +1786,49 @@ def SegmentLogReader(logfile, segInfo):
             # Read again row by row
             for row in reader:
 
-                # TODO : DDboost backup size
                 # During this read we will try to get the size of the dump by this segment
-                if row[globalVariable.row_dumplocation].startswith('gp_dump_agent command line'):
-                    dumplocation = row[pDumpLocation].split('>')[2].strip()
-                    FileSize = DumpSize(dumplocation) / sizeConvertor
+                if row[pDumpLocation].startswith('gp_dump_agent command line'):
+
+                    logger.info("Getting the size of the dump for the host: \"{0}\"".format(
+                            segInfo['host']
+                    ))
+
+                    # Dump file line
+                    line = row[pDumpLocation]
+
+                    # If the line has ddboost command on it.
+                    if 'gpddboost' in line:
+
+                        logger.debug("This a ddboost backup")
+
+                        # fully qualified path
+                        path = row[18].split('--to-file=')[1].split(" ")[0].rpartition('/')
+
+                        # Filename of the dump.
+                        dumplocation = path[-1]
+
+                        # Get the file size
+                        FileSize = ddboost_dump_size(dumplocation) / sizeConvertor
+
+                        logger.debug("Backup stats (path|filename|size): \"{0}|{1}|{2}\"".format(
+                                path,
+                                dumplocation,
+                                FileSize
+                        ))
+
+                    # If the backup is not at ddboost
+                    else:
+
+                        logger.debug("This a filesystem backup")
+
+                        # Lets try reading the row which has the dump location information
+                        dumplocation = line.split('>')[2].strip()
+                        FileSize = DumpSize(dumplocation) / sizeConvertor
+
+                        logger.debug("Backup stats (path|size): \"{0}|{1}\"".format(
+                            dumplocation,
+                            FileSize
+                        ))
 
                 # If the rows matches the PID and it has duration lets gather information.
                 if row[pPid] == segpid and row[pDuration].split(' ')[0] == "duration:":
@@ -1802,7 +1944,8 @@ def SegmentLogReader(logfile, segInfo):
             if InfoSegmentProcess['SegmentPid'] != 0 and InfoSegmentProcess['flag'] == 'DATA':
 
                 # Calling the JsonWriter to store all the data from COPY to a single file
-                logger.debug("Calling Json Writer to store the COPY data for segment (host/dbid/content): \"{0}/{1}/{2}\"".format(
+                logger.debug("Calling Json Writer to store the COPY data "
+                             "for segment (host/dbid/content): \"{0}/{1}/{2}\"".format(
                     segInfo['host'],
                     segInfo['dbid'],
                     segInfo['content']
@@ -1870,6 +2013,7 @@ def RunProgram():
     tempdir = globalVariable.tempdir
     segInfo = {}
     Path = ''
+    jsondatafile = None
 
     # Let get the Start time and end time from the OS Env.
     host = os.getenv('host1', '')
@@ -1939,7 +2083,8 @@ def RunProgram():
                 Path = os.path.dirname(logfile)
 
         if not Path:
-            logger.error("None of the logfile provided for segment (host/dbid/content): \"{0}/{1}/{2}\" exists, exiting...".format(
+            logger.error("None of the logfile provided "
+                         "for segment (host/dbid/content): \"{0}/{1}/{2}\" exists, exiting...".format(
                 segInfo['host'],
                 segInfo['dbid'],
                 segInfo['content']
@@ -2147,7 +2292,6 @@ def LaunchProcess(host, StartTime, EndTime, debug):
         print >> sys.stderr, err
         sys.exit(1)
 
-    # TODO: COpy the content if only exists
     # Copy all the file back to the main host(i.e mostly it should be master
     # Or from the host where the script was called.
     logger.info("Copying the contents from: \"{0}:{1}\" to the main host directory: \"{2}\"".format(
@@ -2159,6 +2303,7 @@ def LaunchProcess(host, StartTime, EndTime, debug):
         subprocess.check_call(
                 'scp -q %s:%s/*%s.log %s' %
                 (
+
                     host,
                     tempdir,
                     __file__,
@@ -2206,7 +2351,7 @@ def main():
     for host in hosts:
         logger.info("Removing temp work directory: \"{0}\" from host: \"{1}\"".format(
             tempdir,
-            tempdir
+            host
         ))
         RemoveTempdir(
             host,
