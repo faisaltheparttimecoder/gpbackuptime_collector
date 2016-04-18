@@ -526,13 +526,19 @@ def ddboost_dump_size(dumpfile, post_data):
 
     # Timestamp of the dump
     timestamp = dumpfile.split('gp_dump')[1].split('_')[3].split('.')[0]
-    logger.debug("Timestamp of the backup: \"{0}\"".format(timestamp))
+    logger.debug("Timestamp for the backup: \"{0}\"".format(timestamp))
+
+    # if the user has used prefix in his backup, the ddboost doesnt support it
+    # so we make the necessary changes here.
+    dumpfile = 'gp_dump' + dumpfile.split('gp_dump')[1]
+    logger.debug("Dumpfile name for the backup: \"{0}\"".format(dumpfile))
 
     # Command to extract the dump size
     if post_data == 'Y':
         command = 'gpmfr --list-file ' + timestamp + '| grep \'' + dumpfile + '\' | grep post_data'
     else:
         command = 'gpmfr --list-file ' + timestamp + '| grep \'' + dumpfile + '\' | grep -v post_data'
+    logger.debug("Dumpfile extraction command for the backup: \"{0}\"".format(command))
 
     # Execute the command
     sizecommand = subprocess.Popen(
@@ -545,6 +551,7 @@ def ddboost_dump_size(dumpfile, post_data):
     # The size of the dump is
     try:
         size = int(sizecommand.stdout.read().split("\t")[3].split("\n")[0])
+        logger.debug("The size of the backup: \"{0}\"".format(size))
 
     # If there is a exception
     except IndexError:
@@ -562,6 +569,7 @@ def DumpSize(dumplocation):
     # The size of the dump is
     try:
         size = os.path.getsize(dumplocation)
+        logger.debug("The size of the backup: \"{0}\"".format(size))
 
     # If there is a exception
     except OSError:
