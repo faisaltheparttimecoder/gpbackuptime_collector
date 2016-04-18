@@ -1322,8 +1322,6 @@ def MasterLogReader(logfile, segInfo):
     # Variables to store the information gathered.
     sharelockpid = []
     exclusivelockpid = []
-    SummaryExclusiveLock = []
-    SummaryShareLock = []
 
     # Basic information on the PID that stores that executed the Exclusive lock
     InfoExclusiveLock = {
@@ -1475,6 +1473,14 @@ def MasterLogReader(logfile, segInfo):
         # about the statement, number of time it was executed, duration and some basic info etc...
         for expid in exclusivelockpid:
 
+            # Reset the data for each PID's
+            InfoExclusiveLock['flag'] = 'NO DATA'
+            InfoExclusiveLock['totalexecution'] = 0
+            SummaryExclusiveLock = []
+            InfoExclusiveLock['timeforlock'] = 0
+            InfoExclusiveLock['timeforrelease'] = 0
+            InfoExclusiveLock['totaltime'] = 0
+
             logger.info("Reading the logfile to capture the information for all "
                         "things run by exclusive lock process: \"{0}\"".format(
                 expid
@@ -1599,6 +1605,14 @@ def MasterLogReader(logfile, segInfo):
         # about the statement, number of time it was executed, duration and some basic info etc...
         for shpid in sharelockpid:
 
+            # Reset the data for each PID's
+            InfoShareLock['flag'] = 'NO DATA'
+            InfoShareLock['totalexecution'] = 0
+            SummaryShareLock = []
+            InfoShareLock['timeforlock'] = 0
+            InfoShareLock['timeforrelease'] = 0
+            InfoShareLock['totaltime'] = 0
+
             logger.info("Reading the logfile to capture the information for all things "
                         "run by share lock process: \"{0}\"".format(
                     shpid
@@ -1631,11 +1645,11 @@ def MasterLogReader(logfile, segInfo):
                     # Statement
                     # We club all the LOCK TABLE as one statement
                     if row[pQuery].startswith('LOCK TABLE'):
-                       statement="LOCK TABLE X IN ACCESS SHARE MODE"
+                       statement = "LOCK TABLE X IN ACCESS SHARE MODE"
 
                     # We club all the COPY statement as one statement
                     elif row[pQuery].startswith('COPY'):
-                       statement="COPY X(x,y,z,..) TO stdout"
+                       statement = "COPY X(x,y,z,..) TO stdout"
 
                     # We trim the statement into 28 character since after that some of the statement
                     # starts to add relation name which make that statement (even though the same) points as
