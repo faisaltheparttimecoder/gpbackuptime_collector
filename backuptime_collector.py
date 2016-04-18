@@ -161,6 +161,7 @@ def Usage(text):
         "-e [--end-time] "
         "-b [--build-hostmap] "
         "-c [--contents]  "
+        "-v [--version]"
         "-d [--debug] "
         "-h [--help] \n".format(
                 __file__
@@ -2041,9 +2042,9 @@ def SegmentLogReader(logfile, segInfo):
                     segInfo['dbid'],
                     segInfo['host']
                 )
-    
+
     # Since we have finished reading the merge file lets remove them, we place one at the end of the segment reader
-    # because in case if there is no DATA then we will leave orphan file on the directory, so making sure we will clean 
+    # because in case if there is no DATA then we will leave orphan file on the directory, so making sure we will clean
     # it up ...
     logger.info("Finished reading the merged file, removing the file: \"{0}\"".format(
         logfile
